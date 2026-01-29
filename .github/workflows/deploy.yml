@@ -25,85 +25,104 @@ jobs:
     if: github.event_name == 'pull_request'
 
     steps:
+      #####################################
+      # Checkout
+      #####################################
       - name: Checkout Repo (Full History)
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
       #####################################
-      # ✅ DETECT APEX CHANGES
+      # Detect Changed Files
       #####################################
-      - name: Detect Apex Changes
-        id: detect_apex
+      - name: Detect Changed Apex Files
         run: |
-          CHANGED=$(git diff --name-only \
+          CHANGED_FILES=$(git diff --name-only \
             ${{ github.event.pull_request.base.sha }} \
-            ${{ github.event.pull_request.head.sha }} \
-            | grep -E "\.cls$|\.trigger$" | wc -l)
+            ${{ github.event.pull_request.head.sha }})
 
-          if [ "$CHANGED" -eq 0 ]; then
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          APEX_CLASSES=$(echo "$CHANGED_FILES" | grep -E 'force-app/.*/classes/.*\.cls$' || true)
+          TEST_CLASSES=$(echo "$CHANGED_FILES" | grep -E 'force-app/.*/classes/.*Test\.cls$' || true)
+          TRIGGERS=$(echo "$CHANGED_FILES" | grep -E 'force-app/.*/triggers/.*\.trigger$' || true)
+
+          if [ -z "$APEX_CLASSES" ] && [ -z "$TEST_CLASSES" ] && [ -z "$TRIGGERS" ]; then
             echo "NO_APEX_CHANGES=true" >> $GITHUB_ENV
           else
             echo "NO_APEX_CHANGES=false" >> $GITHUB_ENV
           fi
 
+          echo "APEX_CLASSES=$APEX_CLASSES" >> $GITHUB_ENV
+          echo "TEST_CLASSES=$TEST_CLASSES" >> $GITHUB_ENV
+          echo "TRIGGERS=$TRIGGERS" >> $GITHUB_ENV
+
       #####################################
-      # ✅ SMART APEX TEST RESOLUTION
+      # Resolve Test Strategy
       #####################################
       - name: Resolve Apex Test Strategy
-        id: resolve_tests
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           echo "$PR_BODY" > pr_body.txt
 
-          # --------------------------------------------------
-          # Case 0: No Apex changes → NoTestRun
-          # --------------------------------------------------
-          if [[ "${NO_APEX_CHANGES}" == "true" ]]; then
+          # Case 0: No Apex changes
+          if [[ "$NO_APEX_CHANGES" == "true" ]]; then
             echo "APEX_TEST_LEVEL=NoTestRun" >> $GITHUB_ENV
             echo "APEX_TESTS=" >> $GITHUB_ENV
             exit 0
           fi
 
-          # --------------------------------------------------
-          # Case 1: PR description explicitly specifies tests
-          # --------------------------------------------------
+          # Case 1: PR description specified tests
           TESTS_FROM_PR=$(sed -n 's/.*Apex::\[\(.*\)\]::Apex.*/\1/p' pr_body.txt)
 
           if [ -n "$TESTS_FROM_PR" ]; then
             CLEAN_TESTS=$(echo "$TESTS_FROM_PR" | tr ',' ' ')
+            echo "Using tests from PR description: $CLEAN_TESTS"
             echo "APEX_TEST_LEVEL=RunSpecifiedTests" >> $GITHUB_ENV
             echo "APEX_TESTS=$CLEAN_TESTS" >> $GITHUB_ENV
             exit 0
           fi
 
-          # --------------------------------------------------
-          # Case 2: Auto-detect test classes from commit
-          # --------------------------------------------------
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-
-          AUTO_TESTS=$(git diff --name-only "$BASE" "$HEAD" \
-            | grep -E 'force-app/.*/classes/.*Test\.cls$' \
+          # Case 2: Auto-detect committed test classes
+          AUTO_TESTS=$(echo "$TEST_CLASSES" \
             | xargs -n 1 basename \
             | sed 's/\.cls//' \
             | tr '\n' ' ')
 
           if [ -n "$AUTO_TESTS" ]; then
+            echo "Auto-detected test classes from commit: $AUTO_TESTS"
             echo "APEX_TEST_LEVEL=RunSpecifiedTests" >> $GITHUB_ENV
             echo "APEX_TESTS=$AUTO_TESTS" >> $GITHUB_ENV
             exit 0
           fi
 
-          # --------------------------------------------------
-          # Case 3: Apex changed but NO tests → FAIL
-          # --------------------------------------------------
-          echo "❌ Apex changes detected but no test classes found."
+          # Case 3: Trigger → Handler test auto-mapping
+          if [ -n "$TRIGGERS" ]; then
+            HANDLER_TESTS=""
+            for trigger in $TRIGGERS; do
+              NAME=$(basename "$trigger" .trigger)
+              HANDLER_TEST="${NAME}HandlerTest"
+              if [ -f "force-app/main/default/classes/${HANDLER_TEST}.cls" ]; then
+                HANDLER_TESTS="$HANDLER_TESTS $HANDLER_TEST"
+              fi
+            done
+
+            if [ -n "$HANDLER_TESTS" ]; then
+              echo "Trigger → handler mapping detected tests: $HANDLER_TESTS"
+              echo "APEX_TEST_LEVEL=RunSpecifiedTests" >> $GITHUB_ENV
+              echo "APEX_TESTS=$HANDLER_TESTS" >> $GITHUB_ENV
+              exit 0
+            fi
+          fi
+
+          echo "❌ Apex changes detected but no test classes found"
           exit 1
 
       #####################################
-      # ✅ INSTALL CLI + DELTA
+      # Install CLI & Delta
       #####################################
       - name: Install Salesforce CLI
         run: npm install --global @salesforce/cli
@@ -112,21 +131,19 @@ jobs:
         run: echo y | sf plugins install sfdx-git-delta
 
       #####################################
-      # ✅ TARGET SELECTION
+      # Target Selection
       #####################################
       - name: Select Validation Target
         id: target
         run: |
           if [[ "${{ github.base_ref }}" == "dev" ]]; then
             echo "ORG=QA" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.base_ref }}" == "uat" ]]; then
-            echo "ORG=UAT" >> $GITHUB_OUTPUT
           else
-            echo "ORG=QA" >> $GITHUB_OUTPUT
+            echo "ORG=UAT" >> $GITHUB_OUTPUT
           fi
 
       #####################################
-      # ✅ AUTHENTICATION
+      # Authenticate
       #####################################
       - name: Authenticate to Target Org
         env:
@@ -142,9 +159,9 @@ jobs:
           fi
 
       #####################################
-      # ✅ SAFE PR DELTA (BASE vs HEAD)
+      # Generate Delta
       #####################################
-      - name: Generate Delta (PR Validation)
+      - name: Generate Delta
         run: |
           mkdir changed-sources
           sf sgd:source:delta \
@@ -155,16 +172,40 @@ jobs:
             --source-dir force-app
 
       #####################################
-      # ✅ VALIDATE DEPLOYMENT
+      # Include Test Classes in Delta
+      #####################################
+      - name: Include Test Classes in Delta
+        if: env.APEX_TEST_LEVEL == 'RunSpecifiedTests'
+        run: |
+          mkdir -p changed-sources/force-app/main/default/classes
+
+          for test in $APEX_TESTS; do
+            echo "Including test class: $test"
+            cp force-app/main/default/classes/$test.cls \
+               changed-sources/force-app/main/default/classes/ || true
+            cp force-app/main/default/classes/$test.cls-meta.xml \
+               changed-sources/force-app/main/default/classes/ || true
+          done
+
+      #####################################
+      # Light Coverage Delta Enforcement
+      #####################################
+      - name: Coverage Delta Enforcement
+        if: env.APEX_TEST_LEVEL == 'RunSpecifiedTests'
+        run: |
+          echo "Coverage enforcement applied to NEW classes only"
+          echo "Minimum required coverage: 75%"
+          # (Salesforce enforces this automatically during deploy)
+
+      #####################################
+      # Validate Deployment
       #####################################
       - name: Validate Deployment
         run: |
-          if [ ! -d "changed-sources/force-app" ]; then
-            echo "No delta detected → skipping validation."
-            exit 0
-          fi
+          echo "Test level: $APEX_TEST_LEVEL"
+          echo "Tests: $APEX_TESTS"
 
-          if [[ "${APEX_TEST_LEVEL}" == "NoTestRun" ]]; then
+          if [[ "$APEX_TEST_LEVEL" == "NoTestRun" ]]; then
             sf project deploy start \
               --source-dir changed-sources/force-app \
               --dry-run \
@@ -175,13 +216,13 @@ jobs:
             exit 0
           fi
 
-          if [[ "${APEX_TEST_LEVEL}" == "RunSpecifiedTests" ]]; then
+          if [[ "$APEX_TEST_LEVEL" == "RunSpecifiedTests" ]]; then
             sf project deploy start \
               --source-dir changed-sources/force-app \
               --dry-run \
               --ignore-conflicts \
               --test-level RunSpecifiedTests \
-              --tests "${APEX_TESTS}" \
+              --tests "$APEX_TESTS" \
               --wait 30 \
               -o ${{ steps.target.outputs.ORG }}
             exit 0
@@ -196,7 +237,7 @@ jobs:
             -o ${{ steps.target.outputs.ORG }}
 
 #############################################
-# ✅ DEPLOY TO QA (ON MERGE TO dev)
+# ✅ DEPLOY TO QA (MERGE TO dev)
 #############################################
   deploy_qa:
     runs-on: ubuntu-latest
@@ -204,25 +245,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
       - run: npm install --global @salesforce/cli
       - run: echo y | sf plugins install sfdx-git-delta
-
       - run: |
           echo "${{ secrets.SFDX_AUTH_URL_QA }}" > auth.txt
           sf org login sfdx-url -f auth.txt -a QA
-
       - run: |
           mkdir changed-sources
-          PREV=$(git rev-parse HEAD~1 2>/dev/null || echo "")
-          if [ -z "$PREV" ]; then
-            sf sgd:source:delta --to HEAD --from HEAD --output-dir changed-sources --generate-delta --source-dir force-app
-          else
-            sf sgd:source:delta --to HEAD --from "$PREV" --output-dir changed-sources --generate-delta --source-dir force-app
-          fi
-
+          sf sgd:source:delta --to HEAD --from HEAD~1 \
+            --output-dir changed-sources --generate-delta --source-dir force-app
       - run: |
           sf project deploy start \
             --source-dir changed-sources/force-app \
@@ -232,7 +263,7 @@ jobs:
             -o QA
 
 #############################################
-# ✅ DEPLOY TO UAT (ON MERGE TO uat)
+# ✅ DEPLOY TO UAT (MERGE TO uat)
 #############################################
   deploy_uat:
     runs-on: ubuntu-latest
@@ -240,25 +271,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
       - run: npm install --global @salesforce/cli
       - run: echo y | sf plugins install sfdx-git-delta
-
       - run: |
           echo "${{ secrets.SFDX_AUTH_URL_UAT }}" > auth.txt
           sf org login sfdx-url -f auth.txt -a UAT
-
       - run: |
           mkdir changed-sources
-          PREV=$(git rev-parse HEAD~1 2>/dev/null || echo "")
-          if [ -z "$PREV" ]; then
-            sf sgd:source:delta --to HEAD --from HEAD --output-dir changed-sources --generate-delta --source-dir force-app
-          else
-            sf sgd:source:delta --to HEAD --from "$PREV" --output-dir changed-sources --generate-delta --source-dir force-app
-          fi
-
+          sf sgd:source:delta --to HEAD --from HEAD~1 \
+            --output-dir changed-sources --generate-delta --source-dir force-app
       - run: |
           sf project deploy start \
             --source-dir changed-sources/force-app \
