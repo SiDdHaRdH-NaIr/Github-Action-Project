@@ -34,7 +34,7 @@ jobs:
           fetch-depth: 0
 
       #####################################
-      # Detect Changed Files
+      # Detect Changed Apex Files (FIXED)
       #####################################
       - name: Detect Changed Apex Files
         run: |
@@ -49,18 +49,27 @@ jobs:
           TEST_CLASSES=$(echo "$CHANGED_FILES" | grep -E 'force-app/.*/classes/.*Test\.cls$' || true)
           TRIGGERS=$(echo "$CHANGED_FILES" | grep -E 'force-app/.*/triggers/.*\.trigger$' || true)
 
-          if [ -z "$APEX_CLASSES" ] && [ -z "$TEST_CLASSES" ] && [ -z "$TRIGGERS" ]; then
+          # Flatten multiline values for GitHub env
+          APEX_CLASSES_SINGLE=$(echo "$APEX_CLASSES" | tr '\n' ' ')
+          TEST_CLASSES_SINGLE=$(echo "$TEST_CLASSES" | tr '\n' ' ')
+          TRIGGERS_SINGLE=$(echo "$TRIGGERS" | tr '\n' ' ')
+
+          if [ -z "$APEX_CLASSES_SINGLE" ] && [ -z "$TEST_CLASSES_SINGLE" ] && [ -z "$TRIGGERS_SINGLE" ]; then
             echo "NO_APEX_CHANGES=true" >> $GITHUB_ENV
           else
             echo "NO_APEX_CHANGES=false" >> $GITHUB_ENV
           fi
 
-          echo "APEX_CLASSES=$APEX_CLASSES" >> $GITHUB_ENV
-          echo "TEST_CLASSES=$TEST_CLASSES" >> $GITHUB_ENV
-          echo "TRIGGERS=$TRIGGERS" >> $GITHUB_ENV
+          echo "APEX_CLASSES=$APEX_CLASSES_SINGLE" >> $GITHUB_ENV
+          echo "TEST_CLASSES=$TEST_CLASSES_SINGLE" >> $GITHUB_ENV
+          echo "TRIGGERS=$TRIGGERS_SINGLE" >> $GITHUB_ENV
+
+          echo "Detected Apex Classes: $APEX_CLASSES_SINGLE"
+          echo "Detected Test Classes: $TEST_CLASSES_SINGLE"
+          echo "Detected Triggers: $TRIGGERS_SINGLE"
 
       #####################################
-      # Resolve Test Strategy
+      # Resolve Apex Test Strategy
       #####################################
       - name: Resolve Apex Test Strategy
         env:
@@ -99,7 +108,7 @@ jobs:
             exit 0
           fi
 
-          # Case 3: Trigger → Handler test auto-mapping
+          # Case 3: Trigger → Handler Test Mapping
           if [ -n "$TRIGGERS" ]; then
             HANDLER_TESTS=""
             for trigger in $TRIGGERS; do
@@ -111,7 +120,7 @@ jobs:
             done
 
             if [ -n "$HANDLER_TESTS" ]; then
-              echo "Trigger → handler mapping detected tests: $HANDLER_TESTS"
+              echo "Trigger → Handler mapped tests: $HANDLER_TESTS"
               echo "APEX_TEST_LEVEL=RunSpecifiedTests" >> $GITHUB_ENV
               echo "APEX_TESTS=$HANDLER_TESTS" >> $GITHUB_ENV
               exit 0
@@ -122,7 +131,7 @@ jobs:
           exit 1
 
       #####################################
-      # Install CLI & Delta
+      # Install CLI & Delta Plugin
       #####################################
       - name: Install Salesforce CLI
         run: npm install --global @salesforce/cli
@@ -143,7 +152,7 @@ jobs:
           fi
 
       #####################################
-      # Authenticate
+      # Authentication
       #####################################
       - name: Authenticate to Target Org
         env:
@@ -178,7 +187,6 @@ jobs:
         if: env.APEX_TEST_LEVEL == 'RunSpecifiedTests'
         run: |
           mkdir -p changed-sources/force-app/main/default/classes
-
           for test in $APEX_TESTS; do
             echo "Including test class: $test"
             cp force-app/main/default/classes/$test.cls \
@@ -188,21 +196,11 @@ jobs:
           done
 
       #####################################
-      # Light Coverage Delta Enforcement
-      #####################################
-      - name: Coverage Delta Enforcement
-        if: env.APEX_TEST_LEVEL == 'RunSpecifiedTests'
-        run: |
-          echo "Coverage enforcement applied to NEW classes only"
-          echo "Minimum required coverage: 75%"
-          # (Salesforce enforces this automatically during deploy)
-
-      #####################################
       # Validate Deployment
       #####################################
       - name: Validate Deployment
         run: |
-          echo "Test level: $APEX_TEST_LEVEL"
+          echo "Test Level: $APEX_TEST_LEVEL"
           echo "Tests: $APEX_TESTS"
 
           if [[ "$APEX_TEST_LEVEL" == "NoTestRun" ]]; then
