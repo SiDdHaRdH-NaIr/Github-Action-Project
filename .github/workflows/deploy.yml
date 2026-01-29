@@ -41,8 +41,8 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED_FILES"
 
-          APEX_CLASSES=$(echo "$CHANGED_FILES" | grep -E 'classes/.*\.cls$' || true)
-          TEST_CLASSES=$(echo "$CHANGED_FILES" | grep -E 'classes/.*Test\.cls$' || true)
+          APEX_CLASSES=$(echo "$CHANGED_FILES" | grep -E 'force-app/.*/classes/.*\.cls$' || true)
+          TEST_CLASSES=$(echo "$CHANGED_FILES" | grep -E 'force-app/.*/classes/.*Test\.cls$' || true)
 
           if [ -z "$APEX_CLASSES" ] && [ -z "$TEST_CLASSES" ]; then
             echo "NO_APEX_CHANGES=true" >> $GITHUB_ENV
@@ -76,10 +76,13 @@ jobs:
           fi
 
       #####################################
-      # Install CLI + Delta Plugin
+      # Install Salesforce CLI + Delta
       #####################################
-      - run: npm install --global @salesforce/cli
-      - run: echo y | sf plugins install sfdx-git-delta
+      - name: Install Salesforce CLI
+        run: npm install --global @salesforce/cli
+
+      - name: Install sfdx-git-delta
+        run: echo y | sf plugins install sfdx-git-delta
 
       #####################################
       # Authenticate (QA for validation)
@@ -90,7 +93,7 @@ jobs:
           sf org login sfdx-url -f auth.txt -a QA
 
       #####################################
-      # Generate Delta (DX ROOT FIXED)
+      # Generate Delta (CORRECT DX ROOT)
       #####################################
       - name: Generate Delta
         run: |
@@ -99,8 +102,7 @@ jobs:
             --to "${{ github.event.pull_request.head.sha }}" \
             --from "${{ github.event.pull_request.base.sha }}" \
             --output-dir changed-sources \
-            --generate-delta \
-            --source-dir force-app
+            --generate-delta
 
       #####################################
       # Ensure Test Classes Are Included
@@ -118,7 +120,7 @@ jobs:
           done
 
       #####################################
-      # Validate Deployment
+      # Validate Deployment (DRY RUN)
       #####################################
       - name: Validate Deployment
         run: |
@@ -160,8 +162,7 @@ jobs:
             --to HEAD \
             --from HEAD~1 \
             --output-dir changed-sources \
-            --generate-delta \
-            --source-dir force-app
+            --generate-delta
 
       - name: Deploy to QA
         run: |
@@ -199,8 +200,7 @@ jobs:
             --to HEAD \
             --from HEAD~1 \
             --output-dir changed-sources \
-            --generate-delta \
-            --source-dir force-app
+            --generate-delta
 
       - name: Deploy to UAT
         run: |
