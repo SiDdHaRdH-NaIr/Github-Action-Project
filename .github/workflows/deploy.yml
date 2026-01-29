@@ -61,7 +61,7 @@ jobs:
           fi
 
           echo "APEX_CLASSES=$APEX_CLASSES_SINGLE" >> $GITHUB_ENV
-          echo "TEST_CLASSES=$TEST_CLASSES_SINGLE" >> $GITHUB_ENV
+          echo "TEST_CLASSES_SINGLE=$TEST_CLASSES_SINGLE" >> $GITHUB_ENV
           echo "TRIGGERS=$TRIGGERS_SINGLE" >> $GITHUB_ENV
 
           echo "Detected Apex Classes: $APEX_CLASSES_SINGLE"
@@ -95,8 +95,8 @@ jobs:
             exit 0
           fi
 
-          # Case 2: Auto-detect committed test classes
-          AUTO_TESTS=$(echo "$TEST_CLASSES" \
+          # Case 2: Auto-detect committed test classes (FIXED)
+          AUTO_TESTS=$(echo "$TEST_CLASSES_SINGLE" \
             | xargs -n 1 basename \
             | sed 's/\.cls//' \
             | tr '\n' ' ')
